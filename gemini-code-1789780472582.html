@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bacterial Bloom - Engine Foundation</title>
+    <style>
+        :root {
+            --palette-1: #29352d; /* Charcoal Brown */
+            --palette-2: #77372d; /* Bitter Chocolate */
+            --palette-3: #9f6e50; /* Faded Copper */
+            --palette-4: #363537; /* Graphite */
+            --palette-5: #5d614c; /* Ebony */
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: #000000;
+            color: var(--palette-3);
+            font-family: 'Courier New', monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+
+        #game-container {
+            position: relative;
+            width: 960px;
+            height: 540px;
+            border: 2px solid var(--palette-4);
+            box-shadow: 0 0 30px rgba(0, 0, 0, 0.9);
+            background-color: var(--palette-4);
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated;
+        }
+
+        #ui-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            text-transform: uppercase;
+            font-weight: bold;
+            letter-spacing: 1px;
+            text-shadow: 1px 1px 0px #000000;
+        }
+
+        .hud-label {
+            color: var(--palette-3);
+            font-size: 14px;
+        }
+
+        .hud-value {
+            color: #ffffff;
+            font-size: 18px;
+        }
+
+        .bar-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .bar-frame {
+            width: 180px;
+            height: 14px;
+            background-color: #000000;
+            border: 1px solid var(--palette-3);
+            padding: 2px;
+        }
+
+        #health-fill {
+            width: 100%;
+            height: 100%;
+            background-color: var(--palette-2); /* Bitter Chocolate Red */
+            transition: width 0.1s linear;
+        }
+
+        #stamina-fill {
+            width: 100%;
+            height: 100%;
+            background-color: var(--palette-5); /* Ebony */
+            transition: width 0.1s linear;
+        }
+
+        #controls-hint {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            color: var(--palette-5);
+            font-size: 12px;
+            text-align: right;
+            pointer-events: none;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <canvas id="viewport" width="960" height="540"></canvas>
+        <div id="ui-overlay">
+            <div><span class="hud-label">Time Elapsed: </span><span id="timer" class="hud-value">00:00.00</span></div>
+            
+            <div class="bar-container">
+                <span class="hud-label" style="width: 70px;">Health:</span>
+                <div class="bar-frame">
+                    <div id="health-fill"></div>
+                </div>
+            </div>
+
+            <div class="bar-container">
+                <span class="hud-label" style="width: 70px;">Stamina:</span>
+                <div class="bar-frame">
+                    <div id="stamina-fill"></div>
+                </div>
+            </div>
+        </div>
+        <div id="controls-hint">
+            [A / D] Move Left/Right<br>
+            [Shift] Sprint<br>
+            [J / Left Click] Attack
+        </div>
+    </div>
+
+    <script>
+        // --- CONSTANTS & PALETTE ---
+        const PALETTE = {
+            CHARCOAL_BROWN: '#29352d',
+            BITTER_CHOCOLATE: '#77372d',
+            FADED_COPPER: '#9f6e50',
+            GRAPHITE: '#363537',
+            EBONY: '#5d614c',
+            WHITE: '#ffffff',
+            BLACK: '#000000'
+        };
+
+        const canvas = document.getElementById('viewport');
+        const ctx = canvas.getContext('2d');
+        const timerEl = document.getElementById('timer');
+        const healthFillEl = document.getElementById('health-fill');
+        const staminaFillEl = document.getElementById('stamina-fill');
+
+        ctx.imageSmoothingEnabled = false;
+
+        // --- INPUT HANDLING ---
+        const keys = {
+            left: false,
+            right: false,
+            sprint: false,
+            attack: false
+        };
+
+        window.addEventListener('keydown', (e) => {
+            if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.left = true;
+            if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.right = true;
+            if (e.shiftKey) keys.sprint = true;
+            if (e.code === 'KeyJ') triggerAttack();
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.left = false;
+            if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.right = false;
+            if (!e.shiftKey) keys.sprint = false;
+        });
+
+        window.addEventListener('mousedown', (e) => {
+            if (e.button === 0) triggerAttack();
+        });
+
+        function triggerAttack() {
+            if (!player.isAttacking) {
+                player.isAttacking = true;
+                player.attackTimer = player.attackDuration;
+                player.hasHit = false; // Reset hit flag for current attack swing
+            }
+        }
+
+        // --- PROCEDURAL ENVIRONMENT ENGINE ---
+        const TILE_SIZE = 32;
+        const CHUNK_WIDTH = 30; 
+        const chunks = new Map();
+        const activeEnemies = [];
+
+        // --- ENEMY TYPES ---
+        const ENEMY_TYPES = {
+            SCOUT: {
+                name: 'Infected Stalker',
+                width: 20,
+                height: 36,
+                hp: 30,
+                maxHp: 30,
+                speed: 2.2,
+                damage: 8,
+                color: PALETTE.FADED_COPPER,
+                attackCooldownMax: 40
+            },
+            BRUTE: {
+                name: 'Bloated Bloomer',
+                width: 36,
+                height: 56,
+                hp: 100,
+                maxHp: 100,
+                speed: 0.8,
+                damage: 25,
+                color: PALETTE.BITTER_CHOCOLATE,
+                attackCooldownMax: 90
+            },
+            RUNNER: {
+                name: 'Frenzied Host',
+                width: 18,
+                height: 32,
+                hp: 20,
+                maxHp: 20,
+                speed: 4.0,
+                damage: 5,
+                color: PALETTE.EBONY,
+                attackCooldownMax: 25
+            }
+        };
+
+        function getChunkKey(chunkIndex) {
+            return `chunk_${chunkIndex}`;
+        }
+
+        function generateChunk(chunkIndex) {
+            const tiles = [];
+            const startX = chunkIndex * CHUNK_WIDTH;
+
+            for (let x = 0; x < CHUNK_WIDTH; x++) {
+                const worldX = startX + x;
+                
+                const baseHeight = 11;
+                const noise = Math.floor(
+                    Math.sin(worldX * 0.15) * 2 + 
+                    Math.sin(worldX * 0.05) * 4
+                );
+                const groundY = baseHeight + noise;
+
+                for (let y = 0; y < 17; y++) {
+                    let tileType = 0; 
+                    if (y === groundY) {
+                        tileType = 1; 
+                    } else if (y > groundY) {
+                        tileType = 2; 
+                    } else if (y === groundY - 1 && Math.random() < 0.12) {
+                        tileType = 3; 
+                    }
+
+                    tiles.push({ x: worldX, y: y, type: tileType });
+                }
+            }
+
+            // Spawn roaming enemies away from starting spawn chunk
+            if (Math.abs(chunkIndex) > 0 && Math.random() < 0.75) {
+                spawnChunkEnemies(chunkIndex);
+            }
+
+            return tiles;
+        }
+
+        function spawnChunkEnemies(chunkIndex) {
+            const startX = chunkIndex * CHUNK_WIDTH * TILE_SIZE;
+            const enemyCount = Math.floor(Math.random() * 2) + 1;
+
+            for (let i = 0; i < enemyCount; i++) {
+                const rand = Math.random();
+                let archetype = ENEMY_TYPES.SCOUT;
+                if (rand < 0.3) archetype = ENEMY_TYPES.RUNNER;
+                else if (rand > 0.7) archetype = ENEMY_TYPES.BRUTE;
+
+                const spawnX = startX + Math.random() * (CHUNK_WIDTH * TILE_SIZE - 64) + 32;
+
+                activeEnemies.push({
+                    ...archetype,
+                    x: spawnX,
+                    y: 0,
+                    vx: 0,
+                    direction: Math.random() < 0.5 ? 1 : -1,
+                    attackCooldown: 0,
+                    invulnerableTimer: 0,
+                    roamTimer: Math.floor(Math.random() * 120) + 60
+                });
+            }
+        }
+
+        function getChunk(chunkIndex) {
+            const key = getChunkKey(chunkIndex);
+            if (!chunks.has(key)) {
+                chunks.set(key, generateChunk(chunkIndex));
+            }
+            return chunks.get(key);
+        }
+
+        // --- PLAYER STATE ---
+        const player = {
+            x: 100,
+            y: 200,
+            width: 24,
+            height: 48,
+            vx: 0,
+            vy: 0,
+            walkSpeed: 3.0,
+            sprintSpeed: 5.5,
+            direction: 1, 
+            hp: 100,
+            maxHp: 100,
+            stamina: 100,
+            maxStamina: 100,
+            isAttacking: false,
+            hasHit: false,
+            attackTimer: 0,
+            attackDuration: 12, 
+            attackBox: { width: 36, height: 40 },
+            invulnerableTimer: 0
+        };
+
+        // --- CAMERA SYSTEM ---
+        const camera = {
+            x: 0,
+            y: 0,
+            shakeAmount: 0
+        };
+
+        // --- GAME TIMING ---
+        let startTime = performance.now();
+        let elapsedTime = 0;
+
+        function checkAABB(a, b) {
+            return a.x < b.x + b.width &&
+                   a.x + a.width > b.x &&
+                   a.y < b.y + b.height &&
+                   a.y + a.height > b.y;
+        }
+
+        // --- UPDATE LOOP ---
+        function update() {
+            elapsedTime = performance.now() - startTime;
+            const seconds = (elapsedTime / 1000).toFixed(2);
+            timerEl.innerText = `00:${seconds.padStart(5, '0')}`;
+
+            // Update UI Bars
+            healthFillEl.style.width = `${Math.max(0, (player.hp / player.maxHp) * 100)}%`;
+            staminaFillEl.style.width = `${Math.max(0, (player.stamina / player.maxStamina) * 100)}%`;
+
+            // Player Invulnerability Decay
+            if (player.invulnerableTimer > 0) player.invulnerableTimer--;
+
+            // 1. Stamina & Speed Logic
+            let currentSpeed = player.walkSpeed;
+            if (keys.sprint && (keys.left || keys.right) && player.stamina > 0) {
+                currentSpeed = player.sprintSpeed;
+                player.stamina = Math.max(0, player.stamina - 0.6);
+            } else {
+                player.stamina = Math.min(player.maxStamina, player.stamina + 0.3);
+            }
+
+            // 2. Horizontal Movement
+            player.vx = 0;
+            if (keys.left) {
+                player.vx = -currentSpeed;
+                player.direction = -1;
+            }
+            if (keys.right) {
+                player.vx = currentSpeed;
+                player.direction = 1;
+            }
+
+            player.x += player.vx;
+
+            // 3. Attack Handling & Enemy Damage Detection
+            if (player.isAttacking) {
+                player.attackTimer--;
+                camera.shakeAmount = Math.max(camera.shakeAmount, 1.5); 
+
+                const attackX = player.direction === 1 
+                    ? player.x + player.width 
+                    : player.x - player.attackBox.width;
+                const playerAttackBounds = {
+                    x: attackX,
+                    y: player.y + 4,
+                    width: player.attackBox.width,
+                    height: player.attackBox.height
+                };
+
+                activeEnemies.forEach(enemy => {
+                    if (enemy.hp > 0 && checkAABB(playerAttackBounds, enemy)) {
+                        if (enemy.invulnerableTimer <= 0) {
+                            enemy.hp -= 20; // Player attack strength
+                            enemy.invulnerableTimer = 10;
+                            enemy.vx = player.direction * 6; // Knockback
+                            camera.shakeAmount = 4.0;
+                        }
+                    }
+                });
+
+                if (player.attackTimer <= 0) {
+                    player.isAttacking = false;
+                }
+            }
+
+            // 4. Player Ground Collision
+            const currentChunkIndex = Math.floor((player.x + player.width / 2) / (CHUNK_WIDTH * TILE_SIZE));
+            const activeTiles = [
+                ...getChunk(currentChunkIndex - 1),
+                ...getChunk(currentChunkIndex),
+                ...getChunk(currentChunkIndex + 1)
+            ];
+
+            const playerFeetX = player.x + player.width / 2;
+            const tileColumn = Math.floor(playerFeetX / TILE_SIZE);
+            
+            let groundTileY = 14 * TILE_SIZE; 
+            for (let tile of activeTiles) {
+                if (tile.x === tileColumn && (tile.type === 1 || tile.type === 2)) {
+                    groundTileY = Math.min(groundTileY, tile.y * TILE_SIZE);
+                }
+            }
+            player.y = groundTileY - player.height;
+
+            // 5. Enemy AI & Roaming Engine
+            for (let i = activeEnemies.length - 1; i >= 0; i--) {
+                const enemy = activeEnemies[i];
+
+                if (enemy.hp <= 0) {
+                    activeEnemies.splice(i, 1);
+                    continue;
+                }
+
+                if (enemy.invulnerableTimer > 0) enemy.invulnerableTimer--;
+                if (enemy.attackCooldown > 0) enemy.attackCooldown--;
+
+                // Distance to player
+                const dx = player.x - enemy.x;
+                const dist = Math.abs(dx);
+
+                // Aggro / Roam Behavior
+                if (dist < 250) {
+                    // Aggressive chase mode
+                    enemy.direction = dx > 0 ? 1 : -1;
+                    enemy.vx = enemy.direction * enemy.speed;
+                } else {
+                    // Passive roaming wander
+                    enemy.roamTimer--;
+                    if (enemy.roamTimer <= 0) {
+                        enemy.direction *= -1;
+                        enemy.roamTimer = Math.floor(Math.random() * 120) + 60;
+                    }
+                    enemy.vx = enemy.direction * (enemy.speed * 0.5);
+                }
+
+                enemy.x += enemy.vx;
+                enemy.vx *= 0.8; // Friction dampening
+
+                // Enemy ground snap
+                const enemyFeetX = enemy.x + enemy.width / 2;
+                const enemyTileCol = Math.floor(enemyFeetX / TILE_SIZE);
+                let enemyGroundY = 14 * TILE_SIZE;
+
+                for (let tile of activeTiles) {
+                    if (tile.x === enemyTileCol && (tile.type === 1 || tile.type === 2)) {
+                        enemyGroundY = Math.min(enemyGroundY, tile.y * TILE_SIZE);
+                    }
+                }
+                enemy.y = enemyGroundY - enemy.height;
+
+                // Enemy Collision with Player (Damage)
+                if (checkAABB(player, enemy) && player.invulnerableTimer <= 0) {
+                    player.hp = Math.max(0, player.hp - enemy.damage);
+                    player.invulnerableTimer = 30; // Immunity frame duration
+                    camera.shakeAmount = 6.0; // Heavy impact feedback
+                }
+            }
+
+            // 6. Camera Tracking & Shake
+            const targetCamX = player.x - canvas.width / 2 + player.width / 2;
+            camera.x += (targetCamX - camera.x) * 0.1; 
+
+            if (camera.shakeAmount > 0) {
+                camera.shakeAmount *= 0.85;
+                if (camera.shakeAmount < 0.1) camera.shakeAmount = 0;
+            }
+        }
+
+        // --- RENDER LOOP ---
+        function render() {
+            const offsetX = (Math.random() - 0.5) * camera.shakeAmount * 2;
+            const offsetY = (Math.random() - 0.5) * camera.shakeAmount * 2;
+
+            ctx.save();
+            ctx.translate(-Math.floor(camera.x + offsetX), Math.floor(offsetY));
+
+            // Clear Background (Graphite / Stark Noon Sky)
+            ctx.fillStyle = PALETTE.GRAPHITE;
+            ctx.fillRect(camera.x - 50, 0, canvas.width + 100, canvas.height);
+
+            const startChunk = Math.floor((camera.x - 100) / (CHUNK_WIDTH * TILE_SIZE));
+            const endChunk = Math.floor((camera.x + canvas.width + 100) / (CHUNK_WIDTH * TILE_SIZE));
+
+            // Draw World Terrain
+            for (let c = startChunk; c <= endChunk; c++) {
+                const chunkTiles = getChunk(c);
+                for (let tile of chunkTiles) {
+                    if (tile.type === 0) continue;
+
+                    const tx = tile.x * TILE_SIZE;
+                    const ty = tile.y * TILE_SIZE;
+
+                    if (tile.type === 1) {
+                        ctx.fillStyle = PALETTE.EBONY;
+                        ctx.fillRect(tx, ty, TILE_SIZE, TILE_SIZE);
+                        ctx.fillStyle = PALETTE.WHITE;
+                        ctx.fillRect(tx, ty, TILE_SIZE, 2);
+                    } else if (tile.type === 2) {
+                        ctx.fillStyle = PALETTE.CHARCOAL_BROWN;
+                        ctx.fillRect(tx, ty, TILE_SIZE, TILE_SIZE);
+                    } else if (tile.type === 3) {
+                        ctx.fillStyle = PALETTE.BITTER_CHOCOLATE;
+                        ctx.fillRect(tx + 4, ty + 8, TILE_SIZE - 8, TILE_SIZE - 8);
+                    }
+                }
+            }
+
+            // Draw Roaming Enemies
+            activeEnemies.forEach(enemy => {
+                if (enemy.x + enemy.width > camera.x - 50 && enemy.x < camera.x + canvas.width + 50) {
+                    ctx.fillStyle = enemy.invulnerableTimer > 0 ? PALETTE.WHITE : enemy.color;
+                    ctx.fillRect(enemy.x, enemy.y, enemy.width, enemy.height);
+
+                    // Enemy Overhead Health Bar
+                    ctx.fillStyle = PALETTE.BLACK;
+                    ctx.fillRect(enemy.x, enemy.y - 8, enemy.width, 4);
+                    ctx.fillStyle = PALETTE.BITTER_CHOCOLATE;
+                    ctx.fillRect(enemy.x, enemy.y - 8, (enemy.hp / enemy.maxHp) * enemy.width, 4);
+                }
+            });
+
+            // Draw Player Character (Flashes White when damaged)
+            ctx.fillStyle = player.invulnerableTimer % 4 > 2 ? PALETTE.WHITE : PALETTE.FADED_COPPER;
+            ctx.fillRect(player.x, player.y, player.width, player.height);
+
+            // High-Noon Shadow Base
+            ctx.fillStyle = PALETTE.BLACK;
+            ctx.fillRect(player.x, player.y + player.height - 4, player.width, 4);
+
+            // Draw Player Attack Slash
+            if (player.isAttacking) {
+                ctx.fillStyle = PALETTE.WHITE;
+                const attackX = player.direction === 1 
+                    ? player.x + player.width 
+                    : player.x - player.attackBox.width;
+                const attackY = player.y + 4;
+
+                ctx.fillRect(attackX, attackY, player.attackBox.width, player.attackBox.height);
+            }
+
+            ctx.restore();
+        }
+
+        // --- MAIN GAME LOOP ---
+        function loop() {
+            update();
+            render();
+            requestAnimationFrame(loop);
+        }
+
+        loop();
+    </script>
+</body>
+</html>
